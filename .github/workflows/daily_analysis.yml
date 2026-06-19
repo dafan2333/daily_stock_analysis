@@ -55,6 +55,25 @@ jobs:
       - name: 创建必要目录
         run: |
           mkdir -p data logs reports
+
+      # 恢复上一轮运行保存的 SQLite 数据库，使分析历史和回测结果连续积累
+      - name: 恢复历史数据库
+        id: restore-stock-db
+        uses: actions/cache/restore@v4
+        with:
+          path: data/stock_analysis.db
+          key: stock-analysis-db-${{ github.run_id }}
+          restore-keys: |
+            stock-analysis-db-
+
+      - name: 检查历史数据库
+        run: |
+          if [ -f data/stock_analysis.db ]; then
+            echo "✅ 已恢复历史数据库"
+            ls -lh data/stock_analysis.db
+          else
+            echo "ℹ️ 未找到历史数据库，本次将创建新数据库"
+          fi
       
       - name: 执行股票分析
         env:
@@ -243,7 +262,15 @@ jobs:
             python main.py $FORCE_RUN_ARG
           fi
       
-      - name: 上传分析报告
+      # Cache 不可覆盖，因此每次使用唯一 key 保存数据库；下一次按前缀恢复最近版本
+      - name: 保存历史数据库缓存
+        if: always() && hashFiles('data/stock_analysis.db') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: data/stock_analysis.db
+          key: stock-analysis-db-${{ github.run_id }}
+
+      - name: 上传分析报告和数据库备份
         uses: actions/upload-artifact@v6
         if: always()
         with:
@@ -251,6 +278,8 @@ jobs:
           path: |
             reports/
             logs/
+            data/stock_analysis.db
+          if-no-files-found: warn
           retention-days: 30
       
       - name: 显示运行结果
