@@ -1,0 +1,99 @@
+name: 历史报告回填与回测
+
+on:
+  workflow_dispatch:
+    inputs:
+      eval_window_days:
+        description: '回测窗口（交易日数）'
+        required: true
+        default: '10'
+        type: choice
+        options:
+          - '5'
+          - '10'
+          - '20'
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: stock-analysis
+  cancel-in-progress: false
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: 创建目录
+        run: mkdir -p data historical_artifacts
+
+      - name: 恢复当前数据库
+        uses: actions/cache/restore@v4
+        with:
+          path: data/stock_analysis.db
+          key: stock-analysis-db-backfill-${{ github.run_id }}
+          restore-keys: |
+            stock-analysis-db-
+
+      - name: 下载未过期的历史分析报告
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/artifacts?per_page=100" \
+            --jq '.artifacts[] | select(.expired == false and (.name | startswith("analysis-reports-"))) | [.id, .name] | @tsv' \
+            > historical_artifacts/artifacts.tsv
+
+          while IFS=$'\t' read -r artifact_id artifact_name; do
+            [ -n "$artifact_id" ] || continue
+            destination="historical_artifacts/${artifact_id}"
+            mkdir -p "$destination"
+            echo "下载 ${artifact_name} (${artifact_id})"
+            gh api "repos/${GITHUB_REPOSITORY}/actions/artifacts/${artifact_id}/zip" > "${destination}/artifact.zip"
+            unzip -q "${destination}/artifact.zip" -d "$destination"
+            rm "${destination}/artifact.zip"
+          done < historical_artifacts/artifacts.tsv
+
+      - name: 导入历史分析信号
+        env:
+          DATABASE_PATH: data/stock_analysis.db
+        run: python scripts/import_historical_reports.py historical_artifacts
+
+      - name: 执行历史回测
+        env:
+          DATABASE_PATH: data/stock_analysis.db
+          BACKTEST_MIN_AGE_DAYS: '0'
+          BACKTEST_EVAL_WINDOW_DAYS: ${{ inputs.eval_window_days }}
+        run: python main.py --backtest --backtest-force --backtest-days "${{ inputs.eval_window_days }}"
+
+      - name: 保存回填后的数据库缓存
+        if: always() && hashFiles('data/stock_analysis.db') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: data/stock_analysis.db
+          key: stock-analysis-db-backfill-${{ github.run_id }}
+
+      - name: 上传回测数据库
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: historical-backtest-${{ github.run_number }}
+          path: data/stock_analysis.db
+          if-no-files-found: error
+          retention-days: 30
