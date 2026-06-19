@@ -24,7 +24,7 @@ concurrency:
 jobs:
   backfill:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 120
 
     steps:
       - name: 检出代码
@@ -70,10 +70,16 @@ jobs:
             rm "${destination}/artifact.zip"
           done < historical_artifacts/artifacts.tsv
 
-      - name: 导入历史分析信号
+      - name: 导入历史信号并批量预取行情
         env:
           DATABASE_PATH: data/stock_analysis.db
-        run: python scripts/import_historical_reports.py historical_artifacts
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
+        run: |
+          python scripts/import_historical_reports.py historical_artifacts \
+            --prefetch-prices \
+            --eval-window-days "${{ inputs.eval_window_days }}" \
+            --max-workers 3
 
       - name: 执行历史回测
         env:
